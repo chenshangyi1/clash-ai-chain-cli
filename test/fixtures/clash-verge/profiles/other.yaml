@@ -1,0 +1,10 @@
+proxies:
+  - name: "Other Node"
+    type: socks5
+    server: other.example.invalid
+    port: 1080
+proxy-groups:
+  - name: "Other Group"
+    type: select
+    proxies: ["Other Node", DIRECT]
+rules: ["MATCH,DIRECT"]

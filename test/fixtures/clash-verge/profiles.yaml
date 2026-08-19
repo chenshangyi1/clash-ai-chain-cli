@@ -1,0 +1,20 @@
+current: demo
+items:
+  - uid: demo
+    type: remote
+    name: Demo Subscription
+    file: demo.yaml
+    option:
+      script: old-script.txt
+  - uid: other
+    type: local
+    name: Other Local
+    file: other.yaml
+  - uid: merge
+    type: merge
+    name: Merge.yaml
+    file: Merge.yaml
+  - uid: script
+    type: script
+    name: Script.js
+    file: Script.js

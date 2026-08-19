@@ -1,0 +1,9 @@
+node_modules/
+.DS_Store
+coverage/
+clash-ai-backups/
+clash-ai-exports/
+*.local.yaml
+*.local.yml
+*.local.json
+*.secret.js

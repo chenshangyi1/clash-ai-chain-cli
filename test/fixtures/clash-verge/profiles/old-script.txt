@@ -1,0 +1,1 @@
+opaque existing script content; the CLI never evaluates this file
