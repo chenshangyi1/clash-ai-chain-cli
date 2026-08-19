@@ -1,0 +1,11 @@
+proxies:
+  - name: "Static SOCKS5 Candidate"
+    type: socks5
+    server: static.example.invalid
+    port: 29220
+    username: fake-user
+    password: fake-password
+  - name: "Static HTTP Candidate"
+    type: http
+    server: http.example.invalid
+    port: 18080

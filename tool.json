@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "1.0",
+  "id": "clash-ai-chain-cli",
+  "name": "Clash AI Chain CLI",
+  "version": "0.1.1",
+  "description": "A local Node.js wizard that installs selective AI/YouTube/X chain rules into Clash Verge Rev or Mihomo Party with backups and rollback.",
+  "runtime": "node >=18",
+  "platforms": ["macos", "windows", "linux"],
+  "entrypoint": "bin/clash-ai.js",
+  "commands": ["setup", "detect", "profiles", "preview", "rollback", "doctor"],
+  "documentation": "README.md"
+}

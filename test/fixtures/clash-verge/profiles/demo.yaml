@@ -1,0 +1,32 @@
+mixed-port: 7890
+allow-lan: false
+bind-address: 127.0.0.1
+external-controller: 127.0.0.1:9097
+mode: rule
+proxies:
+  - name: "🏠 Test Residential"
+    type: socks5
+    server: ph.example.invalid
+    port: 29220
+    username: demo-user
+    password: demo-password
+  - name: "Japan Node 01"
+    type: vmess
+    server: jp.example.invalid
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000001
+    alterId: 0
+    cipher: auto
+    tls: true
+proxy-groups:
+  - name: "⚡ General"
+    type: select
+    proxies:
+      - "Japan Node 01"
+      - DIRECT
+  - name: "DIRECT only"
+    type: select
+    proxies:
+      - DIRECT
+rules:
+  - MATCH,DIRECT
