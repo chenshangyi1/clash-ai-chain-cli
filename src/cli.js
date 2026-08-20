@@ -124,11 +124,27 @@ async function preflightInstallation(flags) {
       : (profiles.find((item) => item.active) || (profiles.length === 1 ? profiles[0] : null));
     if (!profile) return null;
     const snapshot = await adapter.readProfile(profile.id);
-    const installed = adapter.detectInstallation(snapshot);
+    const installed = await detectUsableInstallation(adapter, snapshot);
     return installed.installed ? { adapter, profile, snapshot, alreadyInstalled: installed } : null;
   } catch (_) {
     return null;
   }
+}
+
+async function detectUsableInstallation(adapter, snapshot) {
+  const detected = adapter.detectInstallation(snapshot);
+  if (!detected.installed || !snapshot?.profile?.active || typeof adapter.verifyRuntimeActivation !== 'function') return detected;
+  const runtime = await adapter.verifyRuntimeActivation();
+  if (runtime?.supported && !runtime.active) {
+    return {
+      ...detected,
+      installed: false,
+      repairable: true,
+      runtime,
+      reason: runtime.reason || '脚本已绑定，但当前运行配置没有加载定向链。'
+    };
+  }
+  return { ...detected, runtime };
 }
 
 function finishAlreadyInstalled(state, flags) {
@@ -225,7 +241,7 @@ async function resolveSelection(flags, interactive = true) {
     const profile = await chooseProfile(flags, profiles, prompter);
     if (!profile) throw new Error(`未找到订阅：${flags.profile}`);
     const snapshot = await adapter.readProfile(profile.id);
-    const existingInstall = adapter.detectInstallation(snapshot);
+    const existingInstall = await detectUsableInstallation(adapter, snapshot);
     if (existingInstall.installed && !flags.force) {
       return { adapter, profile, snapshot, prompter, staticSelection, alreadyInstalled: existingInstall };
     }
@@ -263,7 +279,30 @@ async function resolveSelection(flags, interactive = true) {
   }
 }
 
-async function installWithLifecycle({ adapter, snapshot, scriptText, scriptName, noRestart = false, settleMs = 750 }) {
+async function waitForRuntimeActivation(adapter, expected, timeoutMs = 15000, pollIntervalMs = 250) {
+  if (typeof adapter.verifyRuntimeActivation !== 'function') {
+    return { supported: false, active: false, reason: '适配器不支持运行配置复核。' };
+  }
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  let result = await adapter.verifyRuntimeActivation(expected);
+  while (!result?.active && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, Math.max(25, pollIntervalMs)));
+    result = await adapter.verifyRuntimeActivation(expected);
+  }
+  return result;
+}
+
+async function installWithLifecycle({
+  adapter,
+  snapshot,
+  scriptText,
+  scriptName,
+  activationExpected,
+  noRestart = false,
+  settleMs = 500,
+  runtimeTimeoutMs = 15000,
+  pollIntervalMs = 250
+}) {
   const durable = typeof adapter.supportsDurableInstall === 'function'
     ? adapter.supportsDurableInstall(snapshot)
     : Boolean(snapshot?.metadataFile);
@@ -299,7 +338,7 @@ async function installWithLifecycle({ adapter, snapshot, scriptText, scriptName,
   }
 
   if (install.status !== 'written') {
-    return { install, stopped, restart: { status: 'skipped', reason: '仅导出，未修改客户端配置' }, verification: null };
+    return { install, stopped, restart: { status: 'skipped', reason: '仅导出，未修改客户端配置' }, verification: null, runtimeVerification: null };
   }
 
   let restart = { status: 'skipped', reason: '--no-restart' };
@@ -310,7 +349,10 @@ async function installWithLifecycle({ adapter, snapshot, scriptText, scriptName,
   const verification = typeof adapter.verifyInstalledBinding === 'function'
     ? adapter.verifyInstalledBinding(install.profileId, install.scriptFile)
     : { bound: false, active: false, marker: null, error: '适配器不支持绑定复核。' };
-  return { install, stopped, restart, verification };
+  const runtimeVerification = restart.status === 'restarted'
+    ? await waitForRuntimeActivation(adapter, activationExpected, runtimeTimeoutMs, pollIntervalMs)
+    : { supported: true, active: false, reason: restart.reason || '客户端未重新启动，无法复核运行配置。' };
+  return { install, stopped, restart, verification, runtimeVerification };
 }
 
 async function setup(flags) {
@@ -341,15 +383,20 @@ async function setup(flags) {
     snapshot: state.snapshot,
     scriptText: plan.scriptText,
     scriptName: plan.scriptName,
+    activationExpected: {
+      landing: { server: plan.landing.server, port: plan.landing.port },
+      generalProxyGroup: plan.generalProxyGroup
+    },
     noRestart: Boolean(flags['no-restart'])
   });
-  const { install, restart, verification } = lifecycle;
+  const { install, restart, verification, runtimeVerification } = lifecycle;
   if (install.status !== 'written') {
     print({ ...install, client: adapter.name, profile: state.profile.name }, false);
     return install;
   }
   const bindingVerified = Boolean(verification?.bound && verification?.active && verification?.marker);
-  const activated = bindingVerified && restart.status === 'restarted';
+  const runtimeVerified = Boolean(runtimeVerification?.active);
+  const activated = bindingVerified && runtimeVerified && restart.status === 'restarted';
   const report = {
     status: activated ? 'success' : 'partial',
     client: adapter.name,
@@ -358,13 +405,15 @@ async function setup(flags) {
     scriptFile: install.scriptFile,
     backupDirectory: install.backup.directory,
     bindingVerified,
+    runtimeVerified,
     activated,
     restarted: restart.status === 'restarted',
     stop: lifecycle.stopped,
     restart,
+    runtime: runtimeVerification,
     warning: activated ? undefined : (flags['no-restart']
       ? '脚本已写入并复核绑定，但 --no-restart 跳过了客户端重新加载；请手动启动或重载后再检查。'
-      : `未能确认新脚本已持久启用：${verification?.error || restart.reason || '绑定复核失败'}`),
+      : `未能确认新脚本已持久启用：${runtimeVerification?.reason || verification?.error || restart.reason || '绑定或运行配置复核失败'}`),
     rollback: `clash-ai rollback --backup ${install.backup.directory}`
   };
   print(report, Boolean(flags.json));
@@ -438,4 +487,4 @@ async function main(argv) {
   throw new Error(`未知命令：${command}。使用 clash-ai help 查看用法。`);
 }
 
-module.exports = { main, parseArgs, resolveSelection, chooseStaticLanding, chooseProfile, previewText, confirmInstall, preflightInstallation, finishAlreadyInstalled, installWithLifecycle };
+module.exports = { main, parseArgs, resolveSelection, chooseStaticLanding, chooseProfile, previewText, confirmInstall, preflightInstallation, finishAlreadyInstalled, detectUsableInstallation, waitForRuntimeActivation, installWithLifecycle };

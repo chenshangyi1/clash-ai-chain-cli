@@ -55,11 +55,13 @@ clash-ai rollback --backup <backup-directory>
 
 The generated Clash script sends the selected AI domains (OpenAI/ChatGPT, Gemini, Claude, Grok, and X/Twitter) through the selected residential node with its selected `dialer-proxy` front group. YouTube and X/Twitter use the selected normal proxy group. Mainland China domains and IPs, private ranges, and LAN names go `DIRECT`; the final fallback is the normal proxy group, never the residential chain.
 
-The CLI preserves existing profile files and existing scripts. It creates a new script file and binds it to the selected profile. It does not change the system proxy or TUN settings. On unsupported Mihomo Party layouts it stops at preview/export mode instead of guessing a path.
+The CLI preserves existing profile files and existing scripts. It creates a new script file, registers a matching `type: script` item in `profiles.yaml`, and binds that script UID to the selected profile. It does not change the system proxy or TUN settings. On unsupported Mihomo Party layouts it stops at preview/export mode instead of guessing a path.
 
-On macOS, after the final confirmation the CLI first quits the selected client and waits for it to stop completely, then writes the backed-up profile metadata, opens the client again, and re-reads `profiles.yaml` to verify that the exact new script is still bound. This order prevents Clash Verge from saving an older in-memory profile over the newly written binding while it quits. A report says `status: success` only when the client restarted and the binding check passed.
+On macOS, after the final confirmation the CLI first quits the selected client and waits for it to stop completely, then writes the backed-up profile metadata, opens the client again, and re-reads `profiles.yaml` to verify that the exact new Script item is registered and bound. It then polls the generated `clash-verge.yaml` and checks the real residential chain groups, AI/media rules, China direct rules, and normal-proxy fallback. This order prevents Clash Verge from saving older in-memory metadata over the installation. A report says `status: success` only when the client restarted, the binding check passed, and the generated runtime configuration contains the expected selective routing.
 
 `--no-restart` is an advanced/manual mode. Close the client yourself before using it. The CLI can verify the file binding, but it reports a partial result until the client is manually started or reloaded.
+
+If setup reports `status: partial`, use the printed rollback command before trying a different installation. Re-running setup without `--force` also treats an unregistered script file or a missing runtime chain as an incomplete installation instead of incorrectly reporting `already-installed`.
 
 ## Credentials and backups
 

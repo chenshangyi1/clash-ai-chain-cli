@@ -12,6 +12,7 @@ This directory is a standalone local Node.js CLI. It must never fetch remote sub
 - Write only after an explicit confirmation from the user.
 - Back up every file before changing it. Use atomic replacement for writes.
 - Do not modify generated runtime files such as `clash-verge.yaml` or `config.yaml`.
+- A successful Clash Verge installation must register a `type: script` item, bind its UID, and verify the generated runtime file after restart; checking `option.script` alone is insufficient.
 - If a Mihomo Party layout is not positively recognized, export/preview only.
 
 ## Verification
