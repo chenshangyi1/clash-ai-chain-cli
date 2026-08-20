@@ -15,7 +15,7 @@ const { standardRoots } = require('../src/paths');
 const { restartDesktopApp, stopDesktopApp, startDesktopApp } = require('../src/restart');
 const { parseStaticIpFile, cleanPathInput } = require('../src/static-ip');
 const { publicProxyInfo } = require('../src/safety');
-const { chooseStaticLanding, chooseProfile, previewText, confirmInstall, resolveSelection, preflightInstallation, installWithLifecycle } = require('../src/cli');
+const { chooseStaticLanding, chooseProfile, previewText, confirmInstall, resolveSelection, preflightInstallation, detectUsableInstallation, installWithLifecycle } = require('../src/cli');
 
 function tempFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clash-ai-chain-'));
@@ -191,15 +191,22 @@ test('install is atomic, creates a new script, activates selected profile, and r
   const beforeProfiles = fs.readFileSync(path.join(root, 'profiles.yaml'), 'utf8');
   const result = await adapter.installScript({ snapshot, scriptText: plan.scriptText, scriptName: 'demo-install' });
   assert.equal(result.status, 'written');
-  assert.equal(result.activated, true);
+  assert.equal(result.registered, true);
   assert.equal(fs.existsSync(result.scriptFile), true);
   const after = YAML.parse(fs.readFileSync(path.join(root, 'profiles.yaml'), 'utf8'));
   assert.equal(after.current, 'demo');
-  assert.equal(after.items[0].option.script, result.scriptFileName);
+  assert.equal(after.items[0].option.script, result.scriptId);
+  const scriptItem = after.items.find((item) => item.uid === result.scriptId);
+  assert.deepEqual(
+    { uid: scriptItem.uid, type: scriptItem.type, file: scriptItem.file },
+    { uid: result.scriptId, type: 'script', file: result.scriptFileName }
+  );
+  assert.equal(Number.isInteger(scriptItem.updated), true);
   assert.equal(fs.existsSync(path.join(root, 'profiles', 'old-script.txt')), true);
   const installedSnapshot = await adapter.readProfile('demo');
   const installed = adapter.detectInstallation(installedSnapshot);
   assert.equal(installed.installed, true);
+  assert.equal(installed.registered, true);
   assert.equal(installed.marker, '@clash-ai-chain-cli');
   const restored = restoreBackup(result.backup.directory);
   assert.equal(restored.files.length, 3);
@@ -213,6 +220,8 @@ test('setup detection stops before a duplicate install unless force is requested
   const snapshot = await adapter.readProfile('demo');
   const plan = createPlan(snapshot, { landingProxyId: '🏠 Test Residential', generalProxyGroup: '⚡ General' });
   await adapter.installScript({ snapshot, scriptText: plan.scriptText, scriptName: 'first-install' });
+  const runtime = runGeneratedScriptForValidation(plan.scriptText, snapshot.config).config;
+  fs.writeFileSync(path.join(root, 'clash-verge.yaml'), YAML.stringify(runtime));
   const preflight = await preflightInstallation({ client: 'clash-verge-rev', root, profile: 'demo' });
   assert.equal(preflight.alreadyInstalled.installed, true);
   const flags = {
@@ -236,6 +245,10 @@ test('an older selective-chain script is recognized as an existing compatible in
     '// 🌐 其他代理',
     '// MATCH,🌐 其他代理'
   ].join('\n'));
+  const metadataFile = path.join(root, 'profiles.yaml');
+  const metadata = YAML.parse(fs.readFileSync(metadataFile, 'utf8'));
+  metadata.items.push({ uid: 'old-script.txt', type: 'script', file: 'old-script.txt', updated: 1 });
+  fs.writeFileSync(metadataFile, YAML.stringify(metadata));
   const adapter = new ClashVergeAdapter({ root });
   const snapshot = await adapter.readProfile('demo');
   const detected = adapter.detectInstallation(snapshot);
@@ -243,7 +256,20 @@ test('an older selective-chain script is recognized as an existing compatible in
   assert.equal(detected.marker, 'legacy-selective-chain');
 });
 
-test('Clash Verge script references without .js keep the client convention', async () => {
+test('a marked script file without a registered Script item is repairable, not installed', async () => {
+  const root = tempFixture();
+  const adapter = new ClashVergeAdapter({ root });
+  const snapshot = await adapter.readProfile('demo');
+  const plan = createPlan(snapshot, { landingProxyId: '🏠 Test Residential', generalProxyGroup: '⚡ General' });
+  fs.writeFileSync(snapshot.scriptFile, plan.scriptText);
+  const detected = adapter.detectInstallation(await adapter.readProfile('demo'));
+  assert.equal(detected.installed, false);
+  assert.equal(detected.registered, false);
+  assert.equal(detected.repairable, true);
+  assert.match(detected.reason, /未注册/);
+});
+
+test('Clash Verge installs a registered script UID without a file extension', async () => {
   const root = tempFixture();
   fs.renameSync(path.join(root, 'profiles', 'old-script.txt'), path.join(root, 'profiles', 'old-script.js'));
   const metadataFile = path.join(root, 'profiles.yaml');
@@ -256,7 +282,33 @@ test('Clash Verge script references without .js keep the client convention', asy
   const plan = createPlan(snapshot, { landingProxyId: '🏠 Test Residential', generalProxyGroup: '⚡ General' });
   const result = await adapter.installScript({ snapshot, scriptText: plan.scriptText, scriptName: 'style-test' });
   const after = YAML.parse(fs.readFileSync(metadataFile, 'utf8'));
-  assert.equal(after.items[0].option.script, path.basename(result.scriptFile, '.js'));
+  assert.equal(after.items[0].option.script, result.scriptId);
+  assert.equal(path.extname(after.items[0].option.script), '');
+  assert.ok(after.items.some((item) => item.uid === result.scriptId && item.type === 'script' && item.file === result.scriptFileName));
+});
+
+test('Clash Verge runtime verification checks the real chain groups and selective rules', async () => {
+  const root = tempFixture();
+  const adapter = new ClashVergeAdapter({ root });
+  const snapshot = await adapter.readProfile('demo');
+  const plan = createPlan(snapshot, { landingProxyId: '🏠 Test Residential', generalProxyGroup: '⚡ General' });
+  await adapter.installScript({ snapshot, scriptText: plan.scriptText, scriptName: 'runtime-test' });
+  const generated = runGeneratedScriptForValidation(plan.scriptText, snapshot.config).config;
+  fs.writeFileSync(path.join(root, 'clash-verge.yaml'), YAML.stringify(generated));
+  const verified = adapter.verifyRuntimeActivation({
+    landing: { server: plan.landing.server, port: plan.landing.port },
+    generalProxyGroup: plan.generalProxyGroup
+  });
+  assert.equal(verified.active, true);
+  assert.deepEqual(verified.failedChecks, []);
+  const installedSnapshot = await adapter.readProfile('demo');
+  assert.equal((await detectUsableInstallation(adapter, installedSnapshot)).installed, true);
+
+  generated.rules = ['MATCH,⚡ General'];
+  fs.writeFileSync(path.join(root, 'clash-verge.yaml'), YAML.stringify(generated));
+  const failed = await detectUsableInstallation(adapter, await adapter.readProfile('demo'));
+  assert.equal(failed.installed, false);
+  assert.equal(failed.repairable, true);
 });
 
 test('Mihomo Party refuses an unrecognized persistence layout and exports instead', async () => {
@@ -313,6 +365,10 @@ test('durable installation stops the client before writing and verifies after re
     verifyInstalledBinding: () => {
       events.push('verify');
       return { bound: true, active: true, marker: '@clash-ai-chain-cli' };
+    },
+    verifyRuntimeActivation: () => {
+      events.push('runtime');
+      return { supported: true, active: true, checks: {} };
     }
   };
   const result = await installWithLifecycle({
@@ -320,10 +376,12 @@ test('durable installation stops the client before writing and verifies after re
     snapshot: { profile: { id: 'demo' }, metadataFile: '/tmp/profiles.yaml' },
     scriptText: '// fake',
     scriptName: 'fake',
-    settleMs: 0
+    settleMs: 0,
+    runtimeTimeoutMs: 0
   });
-  assert.deepEqual(events, ['stop', 'refresh', 'write', 'start', 'verify']);
+  assert.deepEqual(events, ['stop', 'refresh', 'write', 'start', 'verify', 'runtime']);
   assert.equal(result.verification.bound, true);
+  assert.equal(result.runtimeVerification.active, true);
 });
 
 test('durable installation refuses to write when the client cannot be stopped safely', async () => {

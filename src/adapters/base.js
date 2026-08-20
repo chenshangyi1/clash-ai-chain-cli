@@ -81,6 +81,24 @@ function describeProfile(item, current) {
   };
 }
 
+function scriptReferenceAliases(item) {
+  if (!item) return [];
+  const file = typeof item.file === 'string' ? item.file : '';
+  return [...new Set([
+    item.uid,
+    file,
+    file ? path.basename(file, path.extname(file)) : null
+  ].filter(Boolean).map(String))];
+}
+
+function findRegisteredScriptItem(items, reference) {
+  if (!reference) return null;
+  const wanted = String(reference);
+  return (Array.isArray(items) ? items : []).find((candidate) =>
+    profileItemType(candidate) === 'script' && scriptReferenceAliases(candidate).includes(wanted)
+  ) || null;
+}
+
 class BaseAdapter {
   constructor({ id, name, root, app }) {
     this.id = id;
@@ -118,6 +136,11 @@ class BaseAdapter {
     const profileFile = locateProfileFile(this.root, item);
     if (!profileFile || !fs.existsSync(profileFile)) throw new Error(`目标订阅文件不存在：${item.file}`);
     const config = parseYamlFile(profileFile);
+    const scriptReference = item.option?.script;
+    const scriptItem = findRegisteredScriptItem(items, scriptReference);
+    const scriptFile = scriptReference
+      ? resolveInside(this.root, scriptItem?.file || scriptReference)
+      : null;
     return {
       profile: describeProfile(item, metadata.data.current),
       profileItem: item,
@@ -125,17 +148,19 @@ class BaseAdapter {
       metadataFile: metadata.file,
       profileFile,
       config,
-      scriptFile: item.option?.script ? resolveInside(this.root, item.option.script) : null
+      scriptReference: scriptReference || null,
+      scriptItem,
+      scriptFile
     };
   }
 
   detectInstallation(snapshot) {
     const scriptFile = snapshot?.scriptFile;
     if (!scriptFile || !fs.existsSync(scriptFile) || !fs.statSync(scriptFile).isFile()) {
-      return { installed: false, scriptFile: scriptFile || null, marker: null };
+      return { installed: false, registered: Boolean(snapshot?.scriptItem), repairable: false, scriptFile: scriptFile || null, marker: null };
     }
     if (fs.statSync(scriptFile).size > 5 * 1024 * 1024) {
-      return { installed: false, scriptFile, marker: null, reason: '绑定脚本过大，未读取检查。' };
+      return { installed: false, registered: Boolean(snapshot?.scriptItem), repairable: false, scriptFile, marker: null, reason: '绑定脚本过大，未读取检查。' };
     }
     const text = fs.readFileSync(scriptFile, 'utf8');
     const marker = text.includes('@clash-ai-chain-cli') ? '@clash-ai-chain-cli' :
@@ -145,7 +170,15 @@ class BaseAdapter {
           text.includes('🌐 其他代理') &&
           text.includes('MATCH,🌐 其他代理')
           ? 'legacy-selective-chain' : null));
-    return { installed: Boolean(marker), scriptFile, marker };
+    const registered = Boolean(snapshot?.scriptItem);
+    return {
+      installed: Boolean(marker && registered),
+      registered,
+      repairable: Boolean(marker && !registered),
+      scriptFile,
+      marker,
+      reason: marker && !registered ? '脚本文件存在，但未注册为客户端 Script 配置项目。' : null
+    };
   }
 
   supportsDurableInstall(snapshot) {
@@ -159,14 +192,15 @@ class BaseAdapter {
       const expected = expectedScriptFile ? path.resolve(expectedScriptFile) : null;
       const detected = this.detectInstallation(snapshot);
       return {
-        bound: Boolean(actual && expected && actual === expected),
+        bound: Boolean(actual && expected && actual === expected && detected.registered),
+        registered: detected.registered,
         active: Boolean(snapshot.profile.active),
         marker: detected.marker,
         scriptFile: actual,
         expectedScriptFile: expected
       };
     } catch (error) {
-      return { bound: false, active: false, marker: null, error: error.message };
+      return { bound: false, registered: false, active: false, marker: null, error: error.message };
     }
   }
 
@@ -185,6 +219,7 @@ class BaseAdapter {
       scriptFile,
       changes: [
         `创建新脚本：${scriptFile}`,
+        '注册新的 Script 配置项目，使客户端能够加载该脚本',
         `绑定到订阅：${snapshot.profile.name}`,
         '将所选订阅设为当前配置（不改变系统代理或 TUN）',
         `AI 域名 → 🏠 静态住宅IP（链式）`,
@@ -202,31 +237,39 @@ class BaseAdapter {
     if (typeof validate === 'function') validate(snapshot.config);
     const scriptDir = path.join(this.root, 'profiles');
     ensureDir(scriptDir);
-    const scriptFileName = `${uid()}.js`;
+    const scriptId = uid();
+    const scriptFileName = `${scriptId}.js`;
     const scriptFile = path.join(scriptDir, scriptFileName);
     const filesToBackup = [snapshot.metadataFile, snapshot.profileFile, snapshot.scriptFile];
     const backup = backupFiles(filesToBackup, this.root, 'install', [scriptFile]);
     try {
       writeAtomic(scriptFile, scriptText, 0o600);
       const updated = JSON.parse(JSON.stringify(snapshot.metadata));
-      const item = (updated.items || []).find((candidate) => String(candidate.uid) === String(snapshot.profile.id));
+      if (!Array.isArray(updated.items)) updated.items = [];
+      const item = updated.items.find((candidate) => String(candidate.uid) === String(snapshot.profile.id));
       if (!item) throw new Error('写入前订阅条目已变化，请重新运行预览。');
-      const previousScript = item.option?.script;
-      const scriptReference = typeof previousScript === 'string' && !path.extname(previousScript)
-        ? path.basename(scriptFileName, path.extname(scriptFileName))
-        : scriptFileName;
-      item.option = { ...(item.option || {}), script: scriptReference };
+      if (updated.items.some((candidate) => String(candidate.uid) === scriptId)) {
+        throw new Error('生成的脚本 UID 与现有配置冲突，请重新运行安装。');
+      }
+      updated.items.push({
+        uid: scriptId,
+        type: 'script',
+        file: scriptFileName,
+        updated: Math.floor(Date.now() / 1000)
+      });
+      item.option = { ...(item.option || {}), script: scriptId };
       updated.current = item.uid;
       writeAtomic(snapshot.metadataFile, stringifyYaml(updated));
       return {
         status: 'written',
         backup,
         scriptFile,
+        scriptId,
         scriptFileName,
         scriptName,
         profileFile: snapshot.profileFile,
         profileId: item.uid,
-        activated: true
+        registered: true
       };
     } catch (error) {
       try { require('../safety').restoreBackup(backup.directory); } catch (_) { /* surface original error */ }
@@ -253,6 +296,10 @@ class BaseAdapter {
     return { status: 'manual-required', reason: '此客户端适配器未实现安全的自动启动。' };
   }
 
+  verifyRuntimeActivation() {
+    return { supported: false, active: false, reason: '此客户端适配器未实现运行配置复核。' };
+  }
+
   async validate(snapshot) {
     const errors = [];
     if (!snapshot || !snapshot.config) errors.push('目标配置为空。');
@@ -271,5 +318,6 @@ module.exports = {
   describeProfile,
   locateProfileFile,
   profileItemType,
-  isInternalProfile
+  isInternalProfile,
+  findRegisteredScriptItem
 };

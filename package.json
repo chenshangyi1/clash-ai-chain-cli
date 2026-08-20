@@ -1,6 +1,6 @@
 {
   "name": "clash-ai-chain-cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Local, safety-first setup wizard for selective AI chain proxy rules.",
   "license": "MIT",
   "private": false,
@@ -13,7 +13,7 @@
   },
   "scripts": {
     "test": "node --test",
-    "check": "node --check bin/clash-ai.js && node --check src/cli.js && node --check src/generator.js"
+    "check": "node --check bin/clash-ai.js && node --check src/cli.js && node --check src/generator.js && node --check src/adapters/base.js && node --check src/adapters/clash-verge.js && node --check src/restart.js"
   },
   "dependencies": {
     "yaml": "^2.8.1"
